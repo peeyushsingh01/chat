@@ -38,3 +38,10 @@ Run the setup above on a fresh machine, register `alice` and `bob` in separate b
 
 ## Deploying
 Render/Railway: build `pip install -r requirements.txt`, start `uvicorn main:app --host 0.0.0.0 --port $PORT`, set `COOKIE_SECURE=1`. Use a persistent disk for `DB_PATH`, or the data resets on redeploy.
+
+## Database
+- **Local:** SQLite file (`chat.db`), no setup.
+- **Production:** set `DATABASE_URL` to a Postgres connection string (Neon, Supabase, Render Postgres, etc.). The app creates its tables on startup and your data survives redeploys. Free app hosts wipe local files, so use this when deploying.
+
+## More features
+Edit and delete your own messages (updates live for everyone), in-chat message search, desktop notifications and unread count in the tab title.

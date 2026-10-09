@@ -58,6 +58,7 @@ dialog::backdrop{background:rgba(5,8,20,.5);-webkit-backdrop-filter:blur(4px);ba
 ::-webkit-scrollbar{width:8px}::-webkit-scrollbar-thumb{background:var(--edge);border-radius:8px}
 @media(max-width:700px){#app{grid-template-columns:1fr;padding:8px}#main{display:none}#app.open #side{display:none}#app.open #main{display:flex}#back{display:inline-block}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
+.acts{display:none;gap:4px;justify-content:flex-end}.m:hover .acts,.m:focus-within .acts{display:flex}.acts button{font-size:12px;padding:2px 8px}.del{font-style:italic;opacity:.6}@media(hover:none){.acts{display:flex}}
 </style></head><body>
 <div id="auth" class="hide"><form id="af">
   <h1>Kamand Chat</h1><p>Real-time messaging for campus.</p>
@@ -73,7 +74,7 @@ dialog::backdrop{background:rgba(5,8,20,.5);-webkit-backdrop-filter:blur(4px);ba
     <div id="list"></div>
   </aside>
   <section id="main">
-    <div id="head" class="hide"><button id="back" class="ghost">Back</button><div class="meta"><b id="hname"></b><small id="hsub"></small></div></div>
+    <div id="head" class="hide"><button id="back" class="ghost">Back</button><div class="meta"><b id="hname"></b><small id="hsub"></small></div><input id="find" type="text" placeholder="Search in chat" style="max-width:190px;margin-left:auto" oninput="applyFind()"></div>
     <div id="msgs"><div id="empty">Pick a conversation or start a new chat.</div></div>
     <form id="composer" class="hide"><input id="box" type="text" placeholder="Write a message" autocomplete="off" maxlength="2000"><button>Send</button></form>
   </section>
@@ -108,7 +109,7 @@ $("#af").onsubmit=e=>{e.preventDefault();auth("login")};
 $("#br").onclick=()=>auth("register");
 $("#out").onclick=async()=>{await api("logout","POST");me=null;active=null;ws&&ws.close();location.reload()};
 
-function start(){
+function start(){if("Notification" in window&&Notification.permission=="default")Notification.requestPermission();
   $("#auth").classList.add("hide");$("#app").classList.remove("hide");$("#who").textContent=me.username;connect();
 }
 function connect(){
@@ -123,7 +124,7 @@ async function loadConvs(){
   renderSide();
 }
 function isOn(c){return !c.is_group&&c.members.some(m=>m.id!=me.id&&online.has(m.id))}
-function renderSide(){
+function renderSide(){setTitle();
   const l=$("#list");l.replaceChildren();
   if(!convs.length)l.append(el("p","", "No chats yet. Use New chat to find someone.")).lastChild.style.cssText="padding:16px;color:var(--mu)";
   convs.forEach(c=>{
@@ -141,7 +142,7 @@ function renderHead(){
   $("#hsub").textContent=active.is_group?active.members.map(m=>m.username).join(", "):(isOn(active)?"online":"offline");
 }
 async function open(c){
-  active=c;c.unread=0;$("#app").classList.add("open");
+  active=c;c.unread=0;$("#find").value="";$("#app").classList.add("open");
   $("#head").classList.remove("hide");$("#composer").classList.remove("hide");
   renderHead();renderSide();await loadMsgs();$("#box").focus();
 }
@@ -153,17 +154,41 @@ async function loadMsgs(){
   if(!ms.length)box.append(el("div",null,"No messages yet. Say hello.")).lastChild.id="empty";
   ms.forEach(addMsg);
 }
-function addMsg(m){
-  const box=$("#msgs");const e=$("#empty");if(e)e.remove();
-  const mine=m.sender_id==me.id,b=el("div","m"+(mine?" me":""));
-  if(active.is_group&&!mine)b.append(el("div","who",m.sender));
-  b.append(el("span",null,m.body),el("time",null,fmt(m.ts)));
-  box.append(b);box.scrollTop=box.scrollHeight;
+function paint(b,m){
+  b.dataset.id=m.id;b.dataset.text=m.deleted?"":m.body;b.replaceChildren();
+  if(active.is_group&&m.sender_id!=me.id)b.append(el("div","who",m.sender));
+  b.append(el("span",m.deleted?"del":null,m.deleted?"Message deleted":m.body),el("time",null,(m.edited&&!m.deleted?"edited · ":"")+fmt(m.ts)));
+  if(m.sender_id==me.id&&!m.deleted){
+    const a=el("div","acts"),ed=el("button","ghost","Edit"),dl=el("button","ghost","Delete");
+    ed.onclick=()=>{const v=prompt("Edit message",m.body);if(v&&v.trim()&&v.trim()!=m.body)ws.send(JSON.stringify({type:"edit",conv_id:m.conv_id,id:m.id,body:v.trim()}))};
+    dl.onclick=()=>{if(confirm("Delete this message for everyone?"))ws.send(JSON.stringify({type:"delete",conv_id:m.conv_id,id:m.id}))};
+    a.append(ed,dl);b.append(a);
+  }
+  b._m=m;
 }
+function addMsg(m){
+  const box=$("#msgs"),e=$("#empty");if(e)e.remove();
+  const b=el("div","m"+(m.sender_id==me.id?" me":""));paint(b,m);box.append(b);box.scrollTop=box.scrollHeight;applyFind();
+}
+function updMsg(d,patch){
+  if(!active||active.id!=d.conv_id)return;
+  const b=$(`#msgs [data-id="${d.id}"]`);if(b){Object.assign(b._m,patch);paint(b,b._m);applyFind()}
+}
+function applyFind(){
+  const q=$("#find").value.toLowerCase();
+  document.querySelectorAll("#msgs .m").forEach(b=>b.classList.toggle("hide",!!q&&!(b.dataset.text||"").toLowerCase().includes(q)));
+}
+function notify(d,c){
+  if(document.hidden&&"Notification" in window&&Notification.permission=="granted")
+    new Notification(c.is_group?`${d.sender} in ${c.name}`:d.sender,{body:d.body});
+}
+function setTitle(){const n=convs.reduce((a,c)=>a+(c.unread||0),0);document.title=(n?`(${n}) `:"")+"Kamand Chat"}
 function onEvent(d){
   if(d.type=="online"){online=new Set(d.ids);renderSide();renderHead()}
   else if(d.type=="presence"){d.online?online.add(d.id):online.delete(d.id);renderSide();renderHead()}
   else if(d.type=="refresh")loadConvs();
+  else if(d.type=="edited")updMsg(d,{body:d.body,edited:1});
+  else if(d.type=="deleted")updMsg(d,{deleted:1,body:""});
   else if(d.type=="typing"){
     if(active&&active.id==d.conv_id){$("#hsub").textContent=d.user+" is typing…";clearTimeout(typingT);typingT=setTimeout(renderHead,2000)}
   }else if(d.type=="message"){
@@ -171,6 +196,7 @@ function onEvent(d){
     if(!c){loadConvs();return}
     c.last=d.body;c.ts=d.ts;convs.sort((a,b)=>b.ts-a.ts);
     if(active&&active.id==c.id){addMsg(d);renderHead()}else if(d.sender_id!=me.id)c.unread++;
+    if(d.sender_id!=me.id)notify(d,c);
     renderSide();
   }
 }

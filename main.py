@@ -5,21 +5,60 @@ from pydantic import BaseModel
 
 app = FastAPI()
 HERE = os.path.dirname(os.path.abspath(__file__))
-conn = sqlite3.connect(os.getenv("DB_PATH", os.path.join(HERE, "chat.db")), check_same_thread=False)
-conn.row_factory = sqlite3.Row
-conn.executescript("""
-CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, username TEXT UNIQUE COLLATE NOCASE, salt TEXT, pw TEXT);
-CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER, created REAL);
-CREATE TABLE IF NOT EXISTS convs(id INTEGER PRIMARY KEY, name TEXT, is_group INTEGER, dm_key TEXT UNIQUE, created REAL);
-CREATE TABLE IF NOT EXISTS members(conv_id INTEGER, user_id INTEGER, PRIMARY KEY(conv_id, user_id));
-CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY, conv_id INTEGER, sender_id INTEGER, body TEXT, ts REAL);
-CREATE INDEX IF NOT EXISTS idx_msg ON messages(conv_id, id);
-""")
+DATABASE_URL = os.getenv("DATABASE_URL")  # set this to use Postgres (data survives redeploys)
+
+if DATABASE_URL:
+    import psycopg
+    from psycopg.rows import dict_row
+    IntegrityErr = psycopg.errors.IntegrityError
+    PK = "SERIAL PRIMARY KEY"
+    def connect():
+        return psycopg.connect(DATABASE_URL, autocommit=True, row_factory=dict_row)
+else:
+    IntegrityErr = sqlite3.IntegrityError
+    PK = "INTEGER PRIMARY KEY"
+    def connect():
+        c = sqlite3.connect(os.getenv("DB_PATH", os.path.join(HERE, "chat.db")),
+                            check_same_thread=False, isolation_level=None)
+        c.row_factory = sqlite3.Row
+        return c
+
+conn = connect()
 
 def sql(s, a=()):
-    cur = conn.execute(s, a)
-    conn.commit()
-    return cur
+    global conn
+    if DATABASE_URL:
+        s = s.replace("?", "%s")
+    try:
+        return conn.execute(s, a)
+    except Exception as e:
+        if DATABASE_URL and isinstance(e, (psycopg.OperationalError, psycopg.InterfaceError)):
+            conn = connect()  # idle connection was dropped by the host: reconnect once
+            return conn.execute(s, a)
+        raise
+
+def ins(s, a):
+    if DATABASE_URL:
+        return sql(s + " RETURNING id", a).fetchone()["id"]
+    return sql(s, a).lastrowid
+
+for st in f"""
+CREATE TABLE IF NOT EXISTS users(id {PK}, username TEXT, salt TEXT, pw TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_user ON users(lower(username));
+CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id INTEGER, created DOUBLE PRECISION);
+CREATE TABLE IF NOT EXISTS convs(id {PK}, name TEXT, is_group INTEGER, dm_key TEXT UNIQUE, created DOUBLE PRECISION);
+CREATE TABLE IF NOT EXISTS members(conv_id INTEGER, user_id INTEGER, PRIMARY KEY(conv_id, user_id));
+CREATE TABLE IF NOT EXISTS messages(id {PK}, conv_id INTEGER, sender_id INTEGER, body TEXT, ts DOUBLE PRECISION,
+  edited INTEGER DEFAULT 0, deleted INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_msg ON messages(conv_id, id)
+""".split(";"):
+    if st.strip():
+        sql(st)
+for col in ("edited", "deleted"):  # upgrade databases created before these columns existed
+    try:
+        sql(f"ALTER TABLE messages ADD COLUMN {col} INTEGER DEFAULT 0")
+    except Exception:
+        pass
 
 # ---------- auth ----------
 def hash_pw(pw, salt):
@@ -53,16 +92,16 @@ async def register(c: Creds, resp: Response):
         raise HTTPException(400, "Username: 3-20 letters, digits or _. Password: at least 6 characters.")
     salt = secrets.token_hex(16)
     try:
-        uid = sql("INSERT INTO users(username, salt, pw) VALUES(?,?,?)",
-                  (c.username, salt, hash_pw(c.password, salt))).lastrowid
-    except sqlite3.IntegrityError:
+        uid = ins("INSERT INTO users(username, salt, pw) VALUES(?,?,?)",
+                  (c.username, salt, hash_pw(c.password, salt)))
+    except IntegrityErr:
         raise HTTPException(409, "Username already taken")
     start_session(uid, resp)
     return {"id": uid, "username": c.username}
 
 @app.post("/api/login")
 async def login(c: Creds, resp: Response):
-    u = sql("SELECT * FROM users WHERE username=?", (c.username,)).fetchone()
+    u = sql("SELECT * FROM users WHERE lower(username)=lower(?)", (c.username,)).fetchone()
     if not u or not hmac.compare_digest(u["pw"], hash_pw(c.password, u["salt"])):
         raise HTTPException(401, "Wrong username or password")
     start_session(u["id"], resp)
@@ -87,14 +126,14 @@ def conv_view(cid, uid):
     mem = [dict(r) for r in sql("SELECT u.id, u.username FROM members m JOIN users u ON u.id=m.user_id "
                                 "WHERE m.conv_id=?", (cid,))]
     name = c["name"] if c["is_group"] else next((m["username"] for m in mem if m["id"] != uid), "?")
-    last = sql("SELECT body, ts FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
+    last = sql("SELECT body, ts, deleted FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT 1", (cid,)).fetchone()
     return {"id": cid, "name": name, "is_group": bool(c["is_group"]), "members": mem,
-            "last": last["body"] if last else "", "ts": last["ts"] if last else c["created"]}
+            "last": ("Message deleted" if last["deleted"] else last["body"]) if last else "", "ts": last["ts"] if last else c["created"]}
 
 @app.get("/api/users")
 async def users(request: Request, q: str = ""):
     me_ = current(request)
-    rows = sql("SELECT id, username FROM users WHERE id!=? AND username LIKE ? ORDER BY username LIMIT 50",
+    rows = sql("SELECT id, username FROM users WHERE id!=? AND lower(username) LIKE lower(?) ORDER BY username LIMIT 50",
                (me_["id"], f"%{q}%"))
     return [dict(r) for r in rows]
 
@@ -117,7 +156,7 @@ async def dm(b: DM, request: Request):
     if row:
         cid = row["id"]
     else:
-        cid = sql("INSERT INTO convs(is_group, dm_key, created) VALUES(0,?,?)", (key, time.time())).lastrowid
+        cid = ins("INSERT INTO convs(is_group, dm_key, created) VALUES(0,?,?)", (key, time.time()))
         for u in (me_["id"], b.user_id):
             sql("INSERT INTO members VALUES(?,?)", (cid, u))
     return conv_view(cid, me_["id"])
@@ -133,7 +172,7 @@ async def group(b: Group, request: Request):
     ids = {i for i in b.member_ids if sql("SELECT 1 FROM users WHERE id=?", (i,)).fetchone()} | {me_["id"]}
     if not name or len(ids) < 3:
         raise HTTPException(400, "Give the group a name and pick at least 2 other people")
-    cid = sql("INSERT INTO convs(name, is_group, created) VALUES(?,1,?)", (name, time.time())).lastrowid
+    cid = ins("INSERT INTO convs(name, is_group, created) VALUES(?,1,?)", (name, time.time()))
     for u in ids:
         sql("INSERT INTO members VALUES(?,?)", (cid, u))
     await push(ids, {"type": "refresh"})
@@ -144,7 +183,7 @@ async def messages(cid: int, request: Request):
     me_ = current(request)
     if me_["id"] not in member_ids(cid):
         raise HTTPException(403, "Not a member")
-    rows = sql("SELECT m.id, m.conv_id, m.sender_id, u.username AS sender, m.body, m.ts FROM messages m "
+    rows = sql("SELECT m.id, m.conv_id, m.sender_id, u.username AS sender, m.body, m.ts, m.edited, m.deleted FROM messages m "
                "JOIN users u ON u.id=m.sender_id WHERE m.conv_id=? ORDER BY m.id DESC LIMIT 200", (cid,)).fetchall()
     return [dict(r) for r in reversed(rows)]
 
@@ -184,10 +223,22 @@ async def ws_endpoint(ws: WebSocket):
                 if not body:
                     continue
                 ts = time.time()
-                mid = sql("INSERT INTO messages(conv_id, sender_id, body, ts) VALUES(?,?,?,?)",
-                          (cid, uid, body, ts)).lastrowid
+                mid = ins("INSERT INTO messages(conv_id, sender_id, body, ts) VALUES(?,?,?,?)",
+                          (cid, uid, body, ts))
                 await push(mem, {"type": "message", "id": mid, "conv_id": cid, "sender_id": uid,
                                  "sender": user["username"], "body": body, "ts": ts})
+            elif d.get("type") in ("edit", "delete"):
+                mid = d.get("id")
+                if not isinstance(mid, int):
+                    continue
+                if d["type"] == "edit":
+                    body = str(d.get("body") or "").strip()[:2000]
+                    if body and sql("UPDATE messages SET body=?, edited=1 WHERE id=? AND conv_id=? AND sender_id=? AND deleted=0",
+                                    (body, mid, cid, uid)).rowcount:
+                        await push(mem, {"type": "edited", "conv_id": cid, "id": mid, "body": body})
+                elif sql("UPDATE messages SET body='', deleted=1 WHERE id=? AND conv_id=? AND sender_id=?",
+                         (mid, cid, uid)).rowcount:
+                    await push(mem, {"type": "deleted", "conv_id": cid, "id": mid})
             elif d.get("type") == "typing":
                 await push([m for m in mem if m != uid],
                            {"type": "typing", "conv_id": cid, "user": user["username"]})
