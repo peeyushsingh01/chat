@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kamand Chat</title>
+<style>
+:root{--bg:#e9eeec;--panel:#fff;--line:#d5dedb;--tx:#16231f;--mu:#68807a;--pine:#1f5f4a;--pine2:#e1eee9;--warn:#b4491f}
+*{box-sizing:border-box}
+body{margin:0;height:100dvh;font:15px/1.45 "Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+button,input{font:inherit}
+button{cursor:pointer;border:0;border-radius:8px;padding:9px 14px;background:var(--pine);color:#fff}
+button.ghost{background:none;color:var(--pine);padding:6px 10px}
+input[type=text],input[type=password]{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:#fff}
+:focus-visible{outline:2px solid var(--pine);outline-offset:2px}
+.hide{display:none!important}
+#auth{height:100%;display:grid;place-items:center;padding:16px}
+#auth form{width:min(360px,100%);background:var(--panel);padding:28px;border-radius:14px;display:grid;gap:12px;border:1px solid var(--line)}
+#auth h1{margin:0;font-size:26px;letter-spacing:-.02em}
+#auth p{margin:0;color:var(--mu)}
+.row{display:flex;gap:8px}.row button{flex:1}
+#err{color:var(--warn);min-height:1.4em;font-size:14px}
+#app{height:100%;display:grid;grid-template-columns:320px 1fr}
+#side{background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.bar{display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid var(--line)}
+#list{overflow:auto;flex:1}
+.c{display:flex;gap:10px;padding:11px 14px;border-bottom:1px solid var(--line);cursor:pointer}
+.c:hover,.c.on{background:var(--pine2)}
+.av{width:38px;height:38px;border-radius:50%;background:var(--pine);color:#fff;display:grid;place-items:center;font-weight:600;flex:none;position:relative}
+.av.g{border-radius:10px}
+.dot{position:absolute;right:-1px;bottom:-1px;width:11px;height:11px;border-radius:50%;background:#2fa36b;border:2px solid #fff}
+.meta{min-width:0;flex:1}.meta b,.meta small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+small{color:var(--mu)}
+.badge{background:var(--warn);color:#fff;border-radius:10px;padding:0 7px;font-size:12px;align-self:center}
+#main{display:flex;flex-direction:column;min-height:0;min-width:0}
+#head{padding:12px 16px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center}
+#msgs{flex:1;overflow:auto;padding:16px;display:flex;flex-direction:column;gap:6px}
+.m{max-width:min(520px,80%);padding:8px 12px;border-radius:14px;background:var(--panel);border:1px solid var(--line);overflow-wrap:anywhere;white-space:pre-wrap}
+.m.me{align-self:flex-end;background:var(--pine);color:#fff;border-color:var(--pine)}
+.m .who{font-size:12px;font-weight:600;color:var(--pine)}
+.m time{display:block;font-size:11px;opacity:.65;text-align:right}
+#empty{margin:auto;color:var(--mu);text-align:center}
+#composer{display:flex;gap:8px;padding:12px;background:var(--panel);border-top:1px solid var(--line)}
+dialog{border:0;border-radius:14px;padding:20px;width:min(380px,92vw)}
+dialog::backdrop{background:#0006}
+#ulist{max-height:240px;overflow:auto;margin:10px 0}
+.urow{display:flex;gap:10px;padding:7px 4px;align-items:center;cursor:pointer}
+#back{display:none}
+@media(max-width:700px){#app{grid-template-columns:1fr}#main{display:none}#app.open #side{display:none}#app.open #main{display:flex}#back{display:inline-block}}
+</style></head><body>
+<div id="auth" class="hide"><form id="af">
+  <h1>Kamand Chat</h1><p>Real-time messaging for campus.</p>
+  <input id="u" type="text" placeholder="Username" autocomplete="username" required>
+  <input id="p" type="password" placeholder="Password (6+ characters)" autocomplete="current-password" required>
+  <div id="err" role="alert"></div>
+  <div class="row"><button type="submit" id="bl">Log in</button><button type="button" id="br" class="ghost">Create account</button></div>
+</form></div>
+
+<div id="app" class="hide">
+  <aside id="side">
+    <div class="bar"><b id="who"></b><span><button class="ghost" id="new">New chat</button><button class="ghost" id="out">Log out</button></span></div>
+    <div id="list"></div>
+  </aside>
+  <section id="main">
+    <div id="head" class="hide"><button id="back" class="ghost">Back</button><div class="meta"><b id="hname"></b><small id="hsub"></small></div></div>
+    <div id="msgs"><div id="empty">Pick a conversation or start a new chat.</div></div>
+    <form id="composer" class="hide"><input id="box" type="text" placeholder="Write a message" autocomplete="off" maxlength="2000"><button>Send</button></form>
+  </section>
+</div>
+
+<dialog id="dlg">
+  <b>New chat</b>
+  <input id="search" type="text" placeholder="Search people" style="margin-top:10px">
+  <div id="ulist"></div>
+  <input id="gname" type="text" placeholder="Group name" class="hide">
+  <small>Pick one person for a direct chat, or several for a group.</small>
+  <div class="row" style="margin-top:12px"><button class="ghost" id="cancel">Cancel</button><button id="create">Start chat</button></div>
+</dialog>
+
+<script>
+const $=s=>document.querySelector(s);
+const el=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
+const fmt=ts=>new Date(ts*1000).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
+let me=null,convs=[],active=null,online=new Set(),ws=null,lastTyping=0,typingT=null;
+
+async function api(p,m="GET",b){
+  const r=await fetch("/api/"+p,{method:m,headers:{"Content-Type":"application/json"},body:b?JSON.stringify(b):undefined});
+  if(!r.ok){let d="Something went wrong";try{d=(await r.json()).detail||d}catch{}throw new Error(d)}
+  return r.json();
+}
+async function auth(kind){
+  $("#err").textContent="";
+  try{me=await api(kind,"POST",{username:$("#u").value.trim(),password:$("#p").value});start()}
+  catch(e){$("#err").textContent=e.message}
+}
+$("#af").onsubmit=e=>{e.preventDefault();auth("login")};
+$("#br").onclick=()=>auth("register");
+$("#out").onclick=async()=>{await api("logout","POST");me=null;active=null;ws&&ws.close();location.reload()};
+
+function start(){
+  $("#auth").classList.add("hide");$("#app").classList.remove("hide");$("#who").textContent=me.username;connect();
+}
+function connect(){
+  ws=new WebSocket((location.protocol=="https:"?"wss://":"ws://")+location.host+"/ws");
+  ws.onopen=()=>{loadConvs();if(active)loadMsgs()};
+  ws.onmessage=e=>onEvent(JSON.parse(e.data));
+  ws.onclose=()=>{if(me)setTimeout(connect,1500)};
+}
+async function loadConvs(){
+  convs=(await api("convs")).map(c=>({...c,unread:(convs.find(o=>o.id==c.id)||{}).unread||0}));
+  if(active)active=convs.find(c=>c.id==active.id)||active;
+  renderSide();
+}
+function isOn(c){return !c.is_group&&c.members.some(m=>m.id!=me.id&&online.has(m.id))}
+function renderSide(){
+  const l=$("#list");l.replaceChildren();
+  if(!convs.length)l.append(el("p","", "No chats yet. Use New chat to find someone.")).lastChild.style.cssText="padding:16px;color:var(--mu)";
+  convs.forEach(c=>{
+    const row=el("div","c"+(active&&active.id==c.id?" on":""));
+    const av=el("div","av"+(c.is_group?" g":""),c.name[0].toUpperCase());
+    if(isOn(c))av.append(el("i","dot"));
+    const mt=el("div","meta");mt.append(el("b",null,c.name),el("small",null,c.last||"No messages yet"));
+    row.append(av,mt);if(c.unread)row.append(el("span","badge",c.unread));
+    row.onclick=()=>open(c);l.append(row);
+  });
+}
+function renderHead(){
+  if(!active)return;
+  $("#hname").textContent=active.name;
+  $("#hsub").textContent=active.is_group?active.members.map(m=>m.username).join(", "):(isOn(active)?"online":"offline");
+}
+async function open(c){
+  active=c;c.unread=0;$("#app").classList.add("open");
+  $("#head").classList.remove("hide");$("#composer").classList.remove("hide");
+  renderHead();renderSide();await loadMsgs();$("#box").focus();
+}
+$("#back").onclick=()=>$("#app").classList.remove("open");
+async function loadMsgs(){
+  const id=active.id,ms=await api(`convs/${id}/messages`);
+  if(!active||active.id!=id)return;
+  const box=$("#msgs");box.replaceChildren();
+  if(!ms.length)box.append(el("div",null,"No messages yet. Say hello.")).lastChild.id="empty";
+  ms.forEach(addMsg);
+}
+function addMsg(m){
+  const box=$("#msgs");const e=$("#empty");if(e)e.remove();
+  const mine=m.sender_id==me.id,b=el("div","m"+(mine?" me":""));
+  if(active.is_group&&!mine)b.append(el("div","who",m.sender));
+  b.append(el("span",null,m.body),el("time",null,fmt(m.ts)));
+  box.append(b);box.scrollTop=box.scrollHeight;
+}
+function onEvent(d){
+  if(d.type=="online"){online=new Set(d.ids);renderSide();renderHead()}
+  else if(d.type=="presence"){d.online?online.add(d.id):online.delete(d.id);renderSide();renderHead()}
+  else if(d.type=="refresh")loadConvs();
+  else if(d.type=="typing"){
+    if(active&&active.id==d.conv_id){$("#hsub").textContent=d.user+" is typing…";clearTimeout(typingT);typingT=setTimeout(renderHead,2000)}
+  }else if(d.type=="message"){
+    const c=convs.find(x=>x.id==d.conv_id);
+    if(!c){loadConvs();return}
+    c.last=d.body;c.ts=d.ts;convs.sort((a,b)=>b.ts-a.ts);
+    if(active&&active.id==c.id){addMsg(d);renderHead()}else if(d.sender_id!=me.id)c.unread++;
+    renderSide();
+  }
+}
+$("#composer").onsubmit=e=>{
+  e.preventDefault();const body=$("#box").value.trim();
+  if(!body||!active||ws.readyState!=1)return;
+  ws.send(JSON.stringify({type:"message",conv_id:active.id,body}));$("#box").value="";
+};
+$("#box").oninput=()=>{
+  if(active&&ws.readyState==1&&Date.now()-lastTyping>1500){lastTyping=Date.now();ws.send(JSON.stringify({type:"typing",conv_id:active.id}))}
+};
+
+// new chat / group dialog
+const sel=new Set();
+async function loadUsers(){
+  const us=await api("users?q="+encodeURIComponent($("#search").value)),box=$("#ulist");box.replaceChildren();
+  if(!us.length)box.append(el("small",null,"No one found"));
+  us.forEach(u=>{
+    const l=el("label","urow"),cb=document.createElement("input");cb.type="checkbox";cb.checked=sel.has(u.id);
+    cb.onchange=()=>{cb.checked?sel.add(u.id):sel.delete(u.id);$("#gname").classList.toggle("hide",sel.size<2)};
+    l.append(cb,el("span",null,u.username));box.append(l);
+  });
+}
+$("#new").onclick=()=>{sel.clear();$("#search").value="";$("#gname").value="";$("#gname").classList.add("hide");loadUsers();$("#dlg").showModal()};
+$("#search").oninput=loadUsers;
+$("#cancel").onclick=()=>$("#dlg").close();
+$("#create").onclick=async()=>{
+  const ids=[...sel];if(!ids.length)return;
+  try{
+    const c=ids.length==1?await api("dm","POST",{user_id:ids[0]}):await api("groups","POST",{name:$("#gname").value,member_ids:ids});
+    $("#dlg").close();await loadConvs();open(convs.find(x=>x.id==c.id));
+  }catch(e){alert(e.message)}
+};
+
+(async()=>{
+  try{me=await api("me");start()}catch{$("#auth").classList.remove("hide")}
+})();
+</script></body></html>
